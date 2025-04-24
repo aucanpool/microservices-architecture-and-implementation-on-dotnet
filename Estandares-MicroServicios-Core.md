@@ -136,7 +136,12 @@ public class AccountService {
 @Service
 @RequiredArgsConstructor
 public class SibamexAccountRemoteService {
-
+  private final SibamexAccountRemoteRepository sibamexAccountRemoteRepository;
+/**
+   * Executes a remote account blocking operation via SIBAMEX service with circuit
+   * breaker and retry protection.
+   */
+    @CircuitBreaker(name = "sibamexService", fallbackMethod = "fallbackBlockAccount")
     @Retry(name = "externalService", fallbackMethod = "fallbackBlockAccount")
     public AccountStatusDto blockAccount(String accountNumber) {
         // Llamada a servicio externo para bloquear cuenta
@@ -177,14 +182,35 @@ resilience4j:
 
 #### Ejemplo de Repositorio Remoto con FeignClient:
 ```java
-@FeignClient(name = "sibamexClient", url = "${sibamex.service.url}")
+/**
+ * 
+ * @author BRE02081
+ * @since 18/03/2025
+ */
+@FeignClient("${sibamex-cuenta.uri}")
 public interface SibamexAccountRemoteRepository {
 
-    @PostMapping("/accounts/{accountNumber}/block")
-    AccountStatusDto blockAccount(@PathVariable("accountNumber") String accountNumber);
+  /**
+   * Makes a request to block account.
+   *
+   * @param accountBlock The account block information contained in a DTO
+   * @return AccountBlockResponseDto with the response of the block operation
+   */
+  @PostMapping("/v1/cuenta/bloqueos")
+  public AccountStatusDto blockAccount(@RequestBody AccountBlockDto accountBlockDto);
 
-    @PostMapping("/accounts/{accountNumber}/unblock")
-    AccountStatusDto unblockAccount(@PathVariable("accountNumber") String accountNumber);
+  /**
+   * Unblocks the account through the remote service.
+   *
+   * @param accountLockModel The DTO containing the account unblock information
+   * @return AccountUnblockResponseDto The response containing the result of the
+   *         unblock operation
+   * @throws RemoteServiceException if there is an error communicating with the
+   *                                remote service
+   */
+  @PostMapping("/v1/cuenta/desbloqueos")
+  public AccountStatusDto unblockAccount(@RequestBody AccountUnblockDto accountUnblockDto);
+
 }
 ```
 
