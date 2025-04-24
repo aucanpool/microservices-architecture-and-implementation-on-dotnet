@@ -127,45 +127,48 @@ public class AccountService {
     - Implementación del patrón Circuit Breaker para garantizar resiliencia.
     - Manejo de tiempos de espera y reintentos controlados.
     - Transformación de respuestas externas a objetos internos.
-
+- **Respuesta**:
+    - Retornar datos procesados desde servicios externos.
+    - Manejar errores externos y mapearlos a excepciones internas.
+  - 
 #### Ejemplo de Servicio Remoto con Circuit Breaker:
 ```java
-@Log4j2
 @Service
 @RequiredArgsConstructor
 public class SibamexAccountRemoteService {
 
-  private final SibamexAccountRemoteRepository sibamexAccountRemoteRepository;
-  private static final String REMOTE_CODE = "ECSICU";
+    @Retry(name = "externalService", fallbackMethod = "fallbackBlockAccount")
+    public AccountStatusDto blockAccount(String accountNumber) {
+        // Llamada a servicio externo para bloquear cuenta
+        return externalClient.blockAccount(accountNumber);
+    }
 
-  /**
-   * Executes a remote account blocking operation via SIBAMEX service with circuit
-   * breaker and retry protection.
-   */
-  @CircuitBreaker(name = "sibamexService", fallbackMethod = "fallbackBlockAccount")
-  @Retry(name = "sibamexServiceRetry")
-  public AccountStatusDto blockAccount(AccountBlockDto accountBlockDto) {
-    return sibamexAccountRemoteRepository.blockAccount(accountBlockDto);
-  }
-
-  /**
-   * Fallback method for blockAccount in case of failure.
-   *
-   * @param accountBlockDto The DTO containing the account information to be
-   *                        blocked.
-   * @param throwable       The exception that caused the fallback.
-   * @return AccountStatusDto with a failure status.
-   */
-  public AccountStatusDto fallbackBlockAccount(AccountBlockDto accountBlockDto, Throwable throwable) {
-    log.error("Fallback triggered for blockAccount: {}", throwable.toString());
-    return AccountFactory.createAccountBlockDto(Constants.ZERO);
-  }
+    public AccountStatusDto fallbackBlockAccount(String accountNumber, Throwable throwable) {
+        log.warn("Fallback triggered for blockAccount: {}", throwable.getMessage());
+        return new AccountStatusDto(accountNumber, "BLOCK_FAILED");
+    }
+}
 ```
-
-- **Respuesta**:
-    - Retornar datos procesados desde servicios externos.
-    - Manejar errores externos y mapearlos a excepciones internas.
-
+#### Ejemplo de configuración  resilience4j:
+```yaml
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        registerHealthIndicator: true # Activa el indicador de salud para el circuito
+        slidingWindowSize: 10 # Tamaño de la ventana deslizante para calcular el porcentaje de fallos
+        minimumNumberOfCalls: 5 # Número mínimo de llamadas antes de evaluar el estado del circuito
+        permittedNumberOfCallsInHalfOpenState: 2 # Número de llamadas permitidas en estado semi-abierto
+        waitDurationInOpenState: 10000 # Tiempo de espera en milisegundos antes de intentar reabrir el circuito
+        failureRateThreshold: 50 # Porcentaje de fallos permitido antes de abrir el circuito
+  retry:
+    instances:
+      sibamexRemoto:
+        maxAttempts: 7 # Número máximo de intentos de reintento
+        waitDuration: 1000ms # Tiempo de espera entre intentos de reintento
+        retryExceptions:
+          - com.banregio.next.base.feign.exception.NextFeignExceptionNoOpenCircuit # Excepciones que activan el reintento
+```
 ### 4. Repositorios Remotos
 - **Responsabilidad**: Realizar llamadas HTTP a servicios externos utilizando FeignClient.
 - **Lógica Permitida**:
@@ -174,29 +177,14 @@ public class SibamexAccountRemoteService {
 
 #### Ejemplo de Repositorio Remoto con FeignClient:
 ```java
-@FeignClient("${sibamex-cuenta.uri}")
+@FeignClient(name = "sibamexClient", url = "${sibamex.service.url}")
 public interface SibamexAccountRemoteRepository {
 
-  /**
-   * Makes a request to block account.
-   *
-   * @param accountBlock The account block information contained in a DTO
-   * @return AccountBlockResponseDto with the response of the block operation
-   */
-  @PostMapping("/v1/cuenta/bloqueos")
-  public AccountStatusDto blockAccount(@RequestBody AccountBlockDto accountBlockDto);
+    @PostMapping("/accounts/{accountNumber}/block")
+    AccountStatusDto blockAccount(@PathVariable("accountNumber") String accountNumber);
 
-  /**
-   * Unblocks the account through the remote service.
-   *
-   * @param accountLockModel The DTO containing the account unblock information
-   * @return AccountUnblockResponseDto The response containing the result of the
-   *         unblock operation
-   * @throws RemoteServiceException if there is an error communicating with the
-   *                                remote service
-   */
-  @PostMapping("/v1/cuenta/desbloqueos")
-  public AccountStatusDto unblockAccount(@RequestBody AccountUnblockDto accountUnblockDto);
+    @PostMapping("/accounts/{accountNumber}/unblock")
+    AccountStatusDto unblockAccount(@PathVariable("accountNumber") String accountNumber);
 }
 ```
 
@@ -209,48 +197,16 @@ public interface SibamexAccountRemoteRepository {
 Ejemplo de Manejo de Excepciones Global:
 ```java
 @ControllerAdvice
-@Log4j2
 public class GlobalExceptionHandler {
-    public GlobalExceptionHandler(ErrorAttributes errorAttributes) {
-        this.errorAttributes = errorAttributes;
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<String> handleIllegalArgumentException(IllegalArgumentException e) {
+        return ResponseEntity.badRequest().body(e.getMessage());
     }
 
-    // Handle errors when JSON is not well-formed (invalid syntax)
-    @ExceptionHandler(JsonParseException.class)
-    public ResponseEntity<Map<String, Object>> handleJsonParseException(JsonParseException ex, WebRequest webRequest) {
-        KrAccountException krAccountException = new KrAccountException(
-                KrAccountError.BAD_REQUEST,
-                HttpStatus.BAD_REQUEST, JSON_PARSE_EXCEPTION_MESSAGE);
-        return getNextErrorAttributes(webRequest, krAccountException, ErrorAttributeOptions.defaults());
-    }
-
-    private ResponseEntity<Map<String, Object>> getNextErrorAttributes(WebRequest webRequest,
-            KrAccountException krAccountException, ErrorAttributeOptions options) {
-        webRequest.setAttribute(ORG_SPRINGFRAMEWORK_BOOT_WEB_SERVLET_ERROR_DEFAULT_ERROR_ATTRIBUTES_ERROR,
-                krAccountException, RequestAttributes.SCOPE_REQUEST);
-        String requestUri = DIAGONAL_STRING;
-        if (webRequest instanceof ServletWebRequest) {
-            requestUri = ((ServletWebRequest) webRequest).getRequest().getRequestURI();
-        }
-        webRequest.setAttribute(JAVAX_SERVLET_ERROR_REQUEST_URI,
-                requestUri, RequestAttributes.SCOPE_REQUEST);
-        long duration = BaseUtil.extractDurationRequest(webRequest);
-        MDC.put(BaseConstantes.MDC_DURATION_KEY, String.valueOf(duration));
-        options = options.including(Include.MESSAGE);
-        Map<String, Object> errorAttributesMap = errorAttributes.getErrorAttributes(webRequest,
-                options);
-        return new ResponseEntity<>(errorAttributesMap, krAccountException.getStatus());
-    }
-
-    // Helper method to get field name in InvalidFormatException
-
-    private String extractFieldName(InvalidFormatException ex) {
-        if (!ex.getPath().isEmpty()) {
-            // gets the last element of the field path, which corresponds to the
-            // field name
-            return ex.getPath().get(ex.getPath().size() - 1).getFieldName();
-        }
-        return UNKNOWN_FIELD;
+    @ExceptionHandler(EntityNotFoundException.class)
+    public ResponseEntity<String> handleEntityNotFoundException(EntityNotFoundException e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(e.getMessage());
     }
 }
 ```
