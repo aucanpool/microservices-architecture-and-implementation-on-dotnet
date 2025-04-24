@@ -149,7 +149,7 @@ public class SibamexAccountRemoteService {
     }
 }
 ```
-#### Ejemplo de configuración  resilience4j:
+#### Ejemplo de configuración  resilience4j en application.yml:
 ```yaml
 resilience4j:
   circuitbreaker:
